@@ -13,6 +13,9 @@
 #include <ctf_map.h>
 #include <zephyr/tracing/tracing_format.h>
 #include <zephyr/net/net_ip.h>
+#ifdef CONFIG_SMP
+#include <zephyr/arch/cpu.h>
+#endif
 
 /* Limit strings to 20 bytes to optimize bandwidth */
 #define CTF_MAX_STRING_LEN 20
@@ -50,6 +53,13 @@
 		tracing_format_raw_data(epacket, sizeof(epacket));                                 \
 	}
 
+/* Per-event cpu id: real cpu id in SMP, fixed 0 otherwise */
+#ifdef CONFIG_SMP
+#define CTF_INTERNAL_CPU_ID() ((uint8_t)arch_curr_cpu()->id)
+#else
+#define CTF_INTERNAL_CPU_ID() ((uint8_t)0)
+#endif
+
 #ifdef CONFIG_TRACING_CTF_TIMESTAMP
 #include <zephyr/timing/timing.h>
 
@@ -58,19 +68,32 @@ static inline uint64_t ctf_top_timestamp_get(void)
 	return timing_ns_get();
 }
 
-#define CTF_EVENT(...)                                                                             \
+/*
+ * CTF_EVENT takes the event id as the first argument, followed by an
+ * optional payload. cpu_id is inserted between id and payload so that
+ * the binary layout matches:
+ *   [event header: timestamp, id][event context: cpu_id][event payload]
+ * The id is pulled out as a named arg so ##__VA_ARGS__ can drop the
+ * trailing comma for events that carry no payload (e.g. idle).
+ */
+#define CTF_EVENT(id, ...)                                                                         \
 	{                                                                                          \
 		if (!is_tracing_enabled()) {                                                       \
 			return;                                                                    \
 		}                                                                                  \
 		int key = irq_lock();                                                              \
 		const uint64_t tstamp = ctf_top_timestamp_get();                                   \
+		const uint8_t cpu = CTF_INTERNAL_CPU_ID();                                         \
                                                                                                    \
-		CTF_GATHER_FIELDS(tstamp, __VA_ARGS__)                                             \
+		CTF_GATHER_FIELDS(tstamp, id, cpu, ##__VA_ARGS__)                                  \
 		irq_unlock(key);                                                                   \
 	}
 #else
-#define CTF_EVENT(...) {CTF_GATHER_FIELDS(__VA_ARGS__)}
+#define CTF_EVENT(id, ...)                                                                         \
+	{                                                                                          \
+		const uint8_t cpu = CTF_INTERNAL_CPU_ID();                                         \
+		CTF_GATHER_FIELDS(id, cpu, ##__VA_ARGS__)                                          \
+	}
 #endif
 
 /* Anonymous compound literal with 1 member. Legal since C99.
